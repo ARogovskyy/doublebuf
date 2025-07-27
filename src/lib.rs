@@ -1,3 +1,42 @@
+//! This crate implements a thread-safe double buffer with automatic swapping.
+//!
+//! [`DoubleBuf`] is a data structure with two buffers (buffer 1 and buffer 2) and two [users](Accessor),
+//! each having exclusive access to one of the buffers. The users can request [read](Accessor::read) or [write](Accessor::write) access
+//! to the underlying buffer (we say that a user is _active_ while it keeps this access), such that the following holds:
+//!
+//! _Whenever both users are inactive with at least one having requested [write](Accessor::write) access since the last swap,
+//!  the two buffers are atomically swapped._
+//!
+//! Note that while we use the term "buffer", any type `T` is allowed.
+//!
+//! # Usage
+//! ```
+//! use doublebuf::*;
+//! let mut db: DoubleBuf<u8> = DoubleBuf::new();
+//! let (mut back, mut front) = db.init();
+//! let mut writer = back.write();
+//! let reader = front.read();
+//! // Both are initialized with the default value
+//! assert_eq!(*reader, 0);
+//! assert_eq!(*writer, 0);
+//!
+//! *writer = 5;
+//! drop(writer);
+//! drop(reader);
+//! // the buffers are swapped now!
+//! let reader = front.read();
+//! assert_eq!(*reader, 5);
+//! ```
+//!
+//! # Notes
+//! - `no_std` usage is explicitly allowed, but a [`critical_section`] implementation must be provided.
+//! - In `std` contexts, you may enable the `std` feature of [`critical_section`].
+//! - While double buffers conventionally have a "front" and a "back" buffer (the back buffer being used by the producer and
+//!   the front buffer by the consumer), our implementation is completely symmetric.
+//! - The buffers are not swapped if there has been no [write](Accessor::write) access since the last swap.
+//! - The semantics allow for a live-lock: If the two accessors are continuously overlapping their accesses (that is, if there is no point in time when neither is inactive),
+//!   the buffers will never get swapped.
+
 #![no_std]
 
 use core::{
@@ -19,6 +58,19 @@ struct StateInner {
 // double buffer better testable
 struct State(critical_section::Mutex<Cell<StateInner>>);
 
+/// A thread-safe double buffer with automatic swapping. See [module-level documentation](`doublebuf`) for general notes.
+/// The usual workflow is as follows:
+/// - Construct using [`new`](`DoubleBuf::new`) or [`new_with`](`DoubleBuf::new_with`).
+/// - Call [`init`](`DoubleBuf::init`) once to obtain the [`Accessors`](`Accessor`).
+/// - On the `Accessor`s, call [`read`](`Accessor::read`) and [`write`](`Accessor::write`) as required. It is advisable
+///   to hold the guards returned by those methods for as short as possible.
+///
+/// # Examples
+/// ```
+/// let db: DoubleBuf<u8> = DoubleBuf::new();
+/// let (back, front) = db.init();
+/// // use read() and write() as required
+/// ```
 pub struct DoubleBuf<T> {
     initialized: bool,
     state: State,
@@ -26,6 +78,9 @@ pub struct DoubleBuf<T> {
     buf2: UnsafeCell<T>,
 }
 
+/// A user of the double buffer. There can only ever be exactly two Accessors associated with one initialized double buffer.
+/// The accessor is exclusively associated to one of the two buffers, and can obtain access using the [`Accessor::read`] or [`Accessor::write`]
+/// methods.
 pub struct Accessor<'a, T> {
     inner: &'a DoubleBuf<T>,
     access_buf1_by_def: bool,
@@ -64,6 +119,7 @@ impl<T> DerefMut for WriteGuard<'_, T> {
 }
 
 impl<T> DoubleBuf<T> {
+    /// Constructs a new double buffer. The default values are obtained via [`Default::default`].
     pub fn new() -> DoubleBuf<T>
     where
         T: Default,
@@ -71,6 +127,8 @@ impl<T> DoubleBuf<T> {
         Self::new_with(T::default, T::default)
     }
 
+    /// Constructs a new double buffer with the two buffers containing the values produced by the predicates.
+    /// Note that by default, `buf1` will be associated with the user `init().0` and `buf2` with `init().1` (until they are swapped).
     pub fn new_with(buf1: impl FnOnce() -> T, buf2: impl FnOnce() -> T) -> DoubleBuf<T> {
         DoubleBuf {
             initialized: false,
@@ -84,6 +142,12 @@ impl<T> DoubleBuf<T> {
         }
     }
 
+    /// Initializes the double buffer, returning the accessors.
+    /// This method must not be called more than once.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if called more than once.
     pub fn init(&mut self) -> (Accessor<'_, T>, Accessor<'_, T>) {
         if self.initialized {
             panic!("DoubleBuf::init should be only called once");
@@ -132,7 +196,7 @@ impl<'a, T> Accessor<'a, T> {
         }
     }
 
-    /// Accesses the current associated buffer for writing.
+    /// Accesses the current associated buffer for writing. The accessor is _active_ as long as the returned guard exists.
     ///
     /// Note that it is strongly advised to actually
     /// write to the buffer at least once. This is because the double buffer is marked dirty (ready to be swapped)
@@ -146,6 +210,7 @@ impl<'a, T> Accessor<'a, T> {
         }
     }
 
+    /// Accesses the current associated buffer for reading. The accessor is _active_ as long as the returned guard exists.
     pub fn read(&mut self) -> ReadGuard<'a, T> {
         let buf = self.prepare_access(false);
         ReadGuard {

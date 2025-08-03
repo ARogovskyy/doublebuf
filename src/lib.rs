@@ -58,7 +58,7 @@ struct StateInner {
 // double buffer better testable
 struct State(critical_section::Mutex<Cell<StateInner>>);
 
-/// A thread-safe double buffer with automatic swapping. See [module-level documentation](`doublebuf`) for general notes.
+/// A thread-safe double buffer with automatic swapping. See [module-level documentation](`crate`) for general notes.
 /// The usual workflow is as follows:
 /// - Construct using [`new`](`DoubleBuf::new`) or [`new_with`](`DoubleBuf::new_with`).
 /// - Call [`init`](`DoubleBuf::init`) once to obtain the [`Accessors`](`Accessor`).

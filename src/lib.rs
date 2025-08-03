@@ -67,7 +67,8 @@ struct State(critical_section::Mutex<Cell<StateInner>>);
 ///
 /// # Examples
 /// ```
-/// let db: DoubleBuf<u8> = DoubleBuf::new();
+/// # use doublebuf::*;
+/// let mut db: DoubleBuf<u8> = DoubleBuf::new();
 /// let (back, front) = db.init();
 /// // use read() and write() as required
 /// ```
@@ -81,22 +82,24 @@ pub struct DoubleBuf<T> {
 /// A user of the double buffer. There can only ever be exactly two Accessors associated with one initialized double buffer.
 /// The accessor is exclusively associated to one of the two buffers, and can obtain access using the [`Accessor::read`] or [`Accessor::write`]
 /// methods.
-pub struct Accessor<'a, T> {
-    inner: &'a DoubleBuf<T>,
+pub struct Accessor<'db, T> {
+    inner: &'db DoubleBuf<T>,
     access_buf1_by_def: bool,
 }
 
-pub struct WriteGuard<'a, T> {
-    state: &'a State,
-    inner: &'a mut T,
+pub struct WriteGuard<'ac, 'db, T> {
+    // take a mutable reference to prevent reentrant calls to read/write
+    accessor: &'ac mut Accessor<'db, T>,
+    inner: &'db mut T,
 }
 
-pub struct ReadGuard<'a, T> {
-    state: &'a State,
-    inner: &'a T,
+pub struct ReadGuard<'ac, 'db, T> {
+    // take a mutable reference to prevent reentrant calls to read/write
+    accessor: &'ac mut Accessor<'db, T>,
+    inner: &'db T,
 }
 
-impl<T> Deref for ReadGuard<'_, T> {
+impl<T> Deref for ReadGuard<'_, '_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -104,7 +107,7 @@ impl<T> Deref for ReadGuard<'_, T> {
     }
 }
 
-impl<T> Deref for WriteGuard<'_, T> {
+impl<T> Deref for WriteGuard<'_, '_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -112,7 +115,7 @@ impl<T> Deref for WriteGuard<'_, T> {
     }
 }
 
-impl<T> DerefMut for WriteGuard<'_, T> {
+impl<T> DerefMut for WriteGuard<'_, '_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.inner
     }
@@ -174,8 +177,8 @@ impl<T: Default> Default for DoubleBuf<T> {
     }
 }
 
-impl<'a, T> Accessor<'a, T> {
-    fn prepare_access(&mut self, is_write: bool) -> &'a mut T {
+impl<'db, T> Accessor<'db, T> {
+    fn prepare_access(&mut self, is_write: bool) -> &'db mut T {
         let swapped = critical_section::with(|cs| {
             let s = self.inner.state.0.borrow(cs);
             let mut state = s.get();
@@ -202,19 +205,19 @@ impl<'a, T> Accessor<'a, T> {
     /// write to the buffer at least once. This is because the double buffer is marked dirty (ready to be swapped)
     /// as soon as this method is called. This means that if you call this method but do not write a value, upon release
     /// of the [`WriteGuard`], the buffers will be swapped, and the reader will get an old value.
-    pub fn write(&mut self) -> WriteGuard<'a, T> {
+    pub fn write<'ac>(&'ac mut self) -> WriteGuard<'ac, 'db, T> {
         let buf = self.prepare_access(true);
         WriteGuard {
-            state: &self.inner.state,
+            accessor: self,
             inner: buf,
         }
     }
 
     /// Accesses the current associated buffer for reading. The accessor is _active_ as long as the returned guard exists.
-    pub fn read(&mut self) -> ReadGuard<'a, T> {
+    pub fn read<'ac>(&'ac mut self) -> ReadGuard<'ac, 'db, T> {
         let buf = self.prepare_access(false);
         ReadGuard {
-            state: &self.inner.state,
+            accessor: self,
             inner: buf,
         }
     }
@@ -236,15 +239,15 @@ fn drop_guard(state: &State) {
     });
 }
 
-impl<T> Drop for WriteGuard<'_, T> {
+impl<T> Drop for WriteGuard<'_, '_, T> {
     fn drop(&mut self) {
-        drop_guard(self.state);
+        drop_guard(&self.accessor.inner.state);
     }
 }
 
-impl<T> Drop for ReadGuard<'_, T> {
+impl<T> Drop for ReadGuard<'_, '_, T> {
     fn drop(&mut self) {
-        drop_guard(self.state);
+        drop_guard(&self.accessor.inner.state);
     }
 }
 

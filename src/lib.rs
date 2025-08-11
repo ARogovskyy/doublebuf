@@ -92,21 +92,21 @@ pub struct WriteGuard<'ac, 'db, T> {
     // Conceptually, this should be a &mut reference, but we want to enable this check to be done during runtime.
     // We make sure it is unique in `Accessor::prepare_access` by preventing reentrant calls to read/write.
     accessor: &'ac Accessor<'db, T>,
-    inner: &'db mut T,
+    inner: *mut T,
 }
 
 pub struct ReadGuard<'ac, 'db, T> {
     // Conceptually, this should be a &mut reference, but we want to enable this check to be done during runtime.
     // We make sure it is unique in `Accessor::prepare_access` by preventing reentrant calls to read/write.
     accessor: &'ac Accessor<'db, T>,
-    inner: &'db T,
+    inner: *const T,
 }
 
 impl<T> Deref for ReadGuard<'_, '_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.inner
+        unsafe { &*self.inner }
     }
 }
 
@@ -114,13 +114,13 @@ impl<T> Deref for WriteGuard<'_, '_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.inner
+        unsafe { &*self.inner }
     }
 }
 
 impl<T> DerefMut for WriteGuard<'_, '_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.inner
+        unsafe { &mut *self.inner }
     }
 }
 
@@ -198,7 +198,7 @@ impl<T: Default> Default for DoubleBuf<T> {
 }
 
 impl<'db, T> Accessor<'db, T> {
-    fn prepare_access(&mut self, is_write: bool) -> &'db mut T {
+    fn prepare_access(&self, is_write: bool) -> *mut T {
         if self.is_active.get() {
             panic!(
                 "Accessor is already active. The read / write methods must not be called reentrantly"
@@ -219,9 +219,9 @@ impl<'db, T> Accessor<'db, T> {
             state.swapped
         });
         if self.access_buf1_by_def ^ swapped {
-            unsafe { &mut *self.inner.buf1.get() }
+            self.inner.buf1.get()
         } else {
-            unsafe { &mut *self.inner.buf2.get() }
+            self.inner.buf2.get()
         }
     }
 

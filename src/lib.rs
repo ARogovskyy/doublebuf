@@ -385,4 +385,45 @@ mod tests {
             jh.join().unwrap();
         });
     }
+
+    #[cfg(miri)]
+    fn test_miri_longrun(second_should_write: bool) {
+        let mut db: DoubleBuf<u8> = DoubleBuf::new();
+        let (back, front) = db.init();
+        let writer = move || {
+            for i in 0..64 {
+                let mut w = back.write();
+                *w = i;
+            }
+        };
+        let reader = move || {
+            for i in 0..64 {
+                if second_should_write {
+                    let mut w = front.write();
+                    *w = i;
+                } else {
+                    let r = front.read();
+                    std::hint::black_box(*r);
+                }
+            }
+        };
+        thread::scope(|s| {
+            let join1 = s.spawn(writer);
+            let join2 = s.spawn(reader);
+            join1.join().unwrap();
+            join2.join().unwrap();
+        });
+    }
+
+    #[cfg(miri)]
+    #[test]
+    fn test_miri_longrun_second_reads() {
+        test_miri_longrun(false);
+    }
+
+    #[cfg(miri)]
+    #[test]
+    fn test_miri_longrun_second_writes() {
+        test_miri_longrun(true);
+    }
 }

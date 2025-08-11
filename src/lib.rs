@@ -85,17 +85,20 @@ pub struct DoubleBuf<T> {
 pub struct Accessor<'db, T> {
     inner: &'db DoubleBuf<T>,
     access_buf1_by_def: bool,
+    is_active: Cell<bool>,
 }
 
 pub struct WriteGuard<'ac, 'db, T> {
-    // take a mutable reference to prevent reentrant calls to read/write
-    accessor: &'ac mut Accessor<'db, T>,
+    // Conceptually, this should be a &mut reference, but we want to enable this check to be done during runtime.
+    // We make sure it is unique in `Accessor::prepare_access` by preventing reentrant calls to read/write.
+    accessor: &'ac Accessor<'db, T>,
     inner: &'db mut T,
 }
 
 pub struct ReadGuard<'ac, 'db, T> {
-    // take a mutable reference to prevent reentrant calls to read/write
-    accessor: &'ac mut Accessor<'db, T>,
+    // Conceptually, this should be a &mut reference, but we want to enable this check to be done during runtime.
+    // We make sure it is unique in `Accessor::prepare_access` by preventing reentrant calls to read/write.
+    accessor: &'ac Accessor<'db, T>,
     inner: &'db T,
 }
 
@@ -160,10 +163,12 @@ impl<T> DoubleBuf<T> {
             Accessor {
                 access_buf1_by_def: true,
                 inner: self,
+                is_active: Cell::new(false),
             },
             Accessor {
                 access_buf1_by_def: false,
                 inner: self,
+                is_active: Cell::new(false),
             },
         )
     }
@@ -179,6 +184,12 @@ impl<T: Default> Default for DoubleBuf<T> {
 
 impl<'db, T> Accessor<'db, T> {
     fn prepare_access(&mut self, is_write: bool) -> &'db mut T {
+        if self.is_active.get() {
+            panic!(
+                "Accessor is already active. The read / write methods must not be called reentrantly"
+            );
+        }
+        self.is_active.set(true);
         let swapped = critical_section::with(|cs| {
             let s = self.inner.state.0.borrow(cs);
             let mut state = s.get();
@@ -205,7 +216,7 @@ impl<'db, T> Accessor<'db, T> {
     /// write to the buffer at least once. This is because the double buffer is marked dirty (ready to be swapped)
     /// as soon as this method is called. This means that if you call this method but do not write a value, upon release
     /// of the [`WriteGuard`], the buffers will be swapped, and the reader will get an old value.
-    pub fn write<'ac>(&'ac mut self) -> WriteGuard<'ac, 'db, T> {
+    pub fn write<'ac>(&'ac self) -> WriteGuard<'ac, 'db, T> {
         let buf = self.prepare_access(true);
         WriteGuard {
             accessor: self,
@@ -214,7 +225,7 @@ impl<'db, T> Accessor<'db, T> {
     }
 
     /// Accesses the current associated buffer for reading. The accessor is _active_ as long as the returned guard exists.
-    pub fn read<'ac>(&'ac mut self) -> ReadGuard<'ac, 'db, T> {
+    pub fn read<'ac>(&'ac self) -> ReadGuard<'ac, 'db, T> {
         let buf = self.prepare_access(false);
         ReadGuard {
             accessor: self,
@@ -241,12 +252,14 @@ fn drop_guard(state: &State) {
 
 impl<T> Drop for WriteGuard<'_, '_, T> {
     fn drop(&mut self) {
+        self.accessor.is_active.set(false);
         drop_guard(&self.accessor.inner.state);
     }
 }
 
 impl<T> Drop for ReadGuard<'_, '_, T> {
     fn drop(&mut self) {
+        self.accessor.is_active.set(false);
         drop_guard(&self.accessor.inner.state);
     }
 }
@@ -263,15 +276,18 @@ mod tests {
     };
 
     static_assertions::assert_impl_one!(Accessor<u8>: Send);
+    static_assertions::assert_not_impl_any!(Accessor<u8>: Sync);
 
     #[test]
     fn test_swap() {
         let mut db: DoubleBuf<u8> = DoubleBuf::new();
-        let (mut back, mut front) = db.init();
+        let (back, front) = db.init();
 
         let barrier = Barrier::new(2);
+        let barrier_ref = &barrier;
         thread::scope(|s| {
-            let jh = s.spawn(|| {
+            let jh = s.spawn(move || {
+                let barrier = barrier_ref;
                 let reader = front.read();
                 // barrier to make sure both are (concurrently!) accessing their respective parts of the double buffer
                 barrier.wait();
@@ -328,10 +344,10 @@ mod tests {
     #[test]
     fn test_swap_nosync() {
         let mut db: DoubleBuf<u8> = DoubleBuf::new();
-        let (mut back, mut front) = db.init();
+        let (back, front) = db.init();
 
         thread::scope(|s| {
-            let jh = s.spawn(|| {
+            let jh = s.spawn(move || {
                 let reader = front.read();
                 assert!(*reader == 0 || *reader == 17 || *reader == 18);
                 drop(reader);

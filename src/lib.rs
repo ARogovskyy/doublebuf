@@ -133,6 +133,21 @@ impl<T> DoubleBuf<T> {
         Self::new_with(T::default, T::default)
     }
 
+    /// Constructs a new double buffer from the two provided values. Useful in `const` contexts.
+    /// Note that by default, `buf1` will be associated with the user `init().0` and `buf2` with `init().1` (until they are swapped).
+    pub const fn from_values(buf1: T, buf2: T) -> DoubleBuf<T> {
+        DoubleBuf {
+            initialized: false,
+            state: State(Mutex::new(Cell::new(StateInner {
+                is_dirty: false,
+                counter: 0,
+                swapped: false,
+            }))),
+            buf1: UnsafeCell::new(buf1),
+            buf2: UnsafeCell::new(buf2),
+        }
+    }
+
     /// Constructs a new double buffer with the two buffers containing the values produced by the predicates.
     /// Note that by default, `buf1` will be associated with the user `init().0` and `buf2` with `init().1` (until they are swapped).
     pub fn new_with(buf1: impl FnOnce() -> T, buf2: impl FnOnce() -> T) -> DoubleBuf<T> {
@@ -154,7 +169,7 @@ impl<T> DoubleBuf<T> {
     /// # Panics
     ///
     /// Will panic if called more than once.
-    pub fn init(&mut self) -> (Accessor<'_, T>, Accessor<'_, T>) {
+    pub const fn init(&mut self) -> (Accessor<'_, T>, Accessor<'_, T>) {
         if self.initialized {
             panic!("DoubleBuf::init should be only called once");
         }

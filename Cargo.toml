@@ -2,6 +2,7 @@
 name = "doublebuf"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85.1"
 description = "Concurrent auto-swapping double buffer"
 license = "MIT"
 categories = ["embedded", "no-std", "concurrency"]

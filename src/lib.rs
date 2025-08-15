@@ -13,7 +13,7 @@
 //! ```
 //! use doublebuf::*;
 //! let mut db: DoubleBuf<u8> = DoubleBuf::new();
-//! let (mut back, mut front) = db.init();
+//! let (back, front) = db.init();
 //! let mut writer = back.write();
 //! let reader = front.read();
 //! // Both are initialized with the default value
@@ -82,6 +82,11 @@ pub struct DoubleBuf<T> {
 /// A user of the double buffer. There can only ever be exactly two Accessors associated with one initialized double buffer.
 /// The accessor is exclusively associated to one of the two buffers, and can obtain access using the [`Accessor::read`] or [`Accessor::write`]
 /// methods.
+///
+/// ## Thread Safety
+/// Accessor is `Send`, so you can safely send them to another thread (which is one of the primary driving use cases for a double buffer).
+///
+/// Note that currently, `Accessor` itself is not `Sync`.
 pub struct Accessor<'db, T> {
     inner: &'db DoubleBuf<T>,
     access_buf1_by_def: bool,
@@ -101,6 +106,19 @@ pub struct ReadGuard<'ac, 'db, T> {
     accessor: &'ac Accessor<'db, T>,
     inner: *const T,
 }
+
+// Safety: We need to show that the (1) reference points to valid data and that (2) Rust's aliasing rules are upheld.
+// (1) The pointer was created from valid data inside an `UnsafeCell` inside
+// `DoubleBuf`. The data has not been moved away or invalidated in any way because the guards have have a
+// reference to the Accessor which in turn has a reference to the `DoubleBuf`.
+// (2) This consists of two parts:
+// - No two Accessors are associated with the same buffer. This is due to the fact the two Accessors
+//   are initially associated to different buffers and the swap happens atomically with exclusive access to the state.
+// - At most one guard per accessor: In the current implementation, this is checked at runtime in the read and write
+//   methods by setting a flag (`is_active`). This is safe because we ensure that `Accessor: !Sync`. In the future,
+//   it might be `Sync` if we instead use an AtomicBool.
+// - Taken together, these two imply that there is at most one guard (regardless of type) per buffer, which is a stronger
+//   requirements than Rust's aliasing rules.
 
 impl<T> Deref for ReadGuard<'_, '_, T> {
     type Target = T;
@@ -189,6 +207,10 @@ impl<T> DoubleBuf<T> {
     }
 }
 
+// Safety: all access to the two buffers go through guards of the accessors.
+// We guarantee that, for any of the two buffers,
+// at most one guard can be dereferenced into a reference to it at a time (see above).
+// Note that this implies that `Accessor: Send`, which is what we want!
 unsafe impl<T> Sync for DoubleBuf<T> {}
 
 impl<T: Default> Default for DoubleBuf<T> {
@@ -231,6 +253,9 @@ impl<'db, T> Accessor<'db, T> {
     /// write to the buffer at least once. This is because the double buffer is marked dirty (ready to be swapped)
     /// as soon as this method is called. This means that if you call this method but do not write a value, upon release
     /// of the [`WriteGuard`], the buffers will be swapped, and the reader will get an old value.
+    ///
+    /// ## Panics:
+    /// If the accessor is already active. There can only be one guard; you must drop the old one before calling `read` or `write` again.
     pub fn write<'ac>(&'ac self) -> WriteGuard<'ac, 'db, T> {
         let buf = self.prepare_access(true);
         WriteGuard {
@@ -240,6 +265,9 @@ impl<'db, T> Accessor<'db, T> {
     }
 
     /// Accesses the current associated buffer for reading. The accessor is _active_ as long as the returned guard exists.
+    ///
+    /// ## Panics:
+    /// If the accessor is already active. There can only be one guard; you must drop the old one before calling `read` or `write` again.
     pub fn read<'ac>(&'ac self) -> ReadGuard<'ac, 'db, T> {
         let buf = self.prepare_access(false);
         ReadGuard {

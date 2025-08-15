@@ -454,4 +454,16 @@ mod tests {
     fn test_miri_longrun_second_writes() {
         test_miri_longrun(true);
     }
+
+    #[test]
+    #[should_panic]
+    fn test_reentrant_read() {
+        let mut db: DoubleBuf<u8> = DoubleBuf::new();
+        let (back, _) = db.init();
+        let g1 = back.read();
+        let g2 = back.read();
+        // both guards active at the same time, should be impossible
+        drop(g1);
+        drop(g2);
+    }
 }

@@ -378,6 +378,16 @@ mod tests {
     static_assertions::assert_not_impl_any!(ReadGuard<'static, 'static, u8>: Send, Sync);
     static_assertions::assert_not_impl_any!(WriteGuard<'static, 'static, u8>: Send, Sync);
 
+    // `DoubleBuf` and `Accessor` are `Debug` regardless of `T` (they never print the buffers),
+    // while the guards print the value and therefore need `T: Debug`.
+    struct NoDebug;
+    static_assertions::assert_impl_all!(DoubleBuf<NoDebug>: fmt::Debug);
+    static_assertions::assert_impl_all!(Accessor<NoDebug>: fmt::Debug);
+    static_assertions::assert_not_impl_any!(ReadGuard<'static, 'static, NoDebug>: fmt::Debug);
+    static_assertions::assert_not_impl_any!(WriteGuard<'static, 'static, NoDebug>: fmt::Debug);
+    static_assertions::assert_impl_all!(ReadGuard<'static, 'static, u8>: fmt::Debug);
+    static_assertions::assert_impl_all!(WriteGuard<'static, 'static, u8>: fmt::Debug);
+
     #[test]
     fn test_both_write() {
         let mut db: DoubleBuf<u8> = DoubleBuf::new();

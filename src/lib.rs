@@ -211,7 +211,12 @@ impl<T> DoubleBuf<T> {
 // We guarantee that, for any of the two buffers,
 // at most one guard can be dereferenced into a reference to it at a time (see above).
 // Note that this implies that `Accessor: Send`, which is what we want!
-unsafe impl<T> Sync for DoubleBuf<T> {}
+
+/// [`DoubleBuf`] provides synchronization for its data.
+/// The [`Send`] bound on `T` is needed for a similar reason that it is needed on the stdlib
+/// Mutex; see the docs there for an explanation (in short, it would otherwise allow us to send
+/// `!Send` types across boundaries).
+unsafe impl<T: Send> Sync for DoubleBuf<T> {}
 
 impl<T: Default> Default for DoubleBuf<T> {
     fn default() -> Self {
@@ -320,6 +325,10 @@ mod tests {
 
     static_assertions::assert_impl_one!(Accessor<u8>: Send);
     static_assertions::assert_not_impl_any!(Accessor<u8>: Sync);
+
+    // do not allow `!Send` types like `Rc` to be sent across threads
+    static_assertions::assert_not_impl_any!(Accessor<std::rc::Rc<u8>>: Send);
+
 
     #[test]
     fn test_swap() {

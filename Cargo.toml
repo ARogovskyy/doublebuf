@@ -11,6 +11,9 @@ authors = ["Alexander Rogovskyy"]
 readme = "README.md"
 repository = "https://github.com/ARogovskyy/doublebuf"
 
+[features]
+std = ["critical-section/std"]
+
 [dependencies]
 critical-section = "1.2.0"
 

@@ -10,6 +10,13 @@ This crate provides a double buffer. Differences to existing implementations:
 
 Usage:
 
+On `std`, enable the `std` feature:
+```toml
+doublebuf = { version = "0.1", features = ["std"] }
+```
+On `no_std`, leave the feature off and provide a `critical-section` implementation.
+
+
 ```rust
 use doublebuf::*;
 let mut db: DoubleBuf<u8> = DoubleBuf::new();

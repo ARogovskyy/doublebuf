@@ -30,7 +30,7 @@
 //!
 //! # Notes
 //! - `no_std` usage is explicitly allowed, but a [`critical_section`] implementation must be provided.
-//! - In `std` contexts, you may enable the `std` feature of [`critical_section`].
+//! - In `std` contexts, enable this crate's `std` feature, which selects the `std` implementation of [`critical_section`].
 //! - While double buffers conventionally have a "front" and a "back" buffer (the back buffer being used by the producer and
 //!   the front buffer by the consumer), our implementation is completely symmetric.
 //! - The buffers are not swapped if there has been no [write](Accessor::write) access since the last swap.

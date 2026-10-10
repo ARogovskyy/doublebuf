@@ -13,7 +13,7 @@ Usage:
 ```rust
 use doublebuf::*;
 let mut db: DoubleBuf<u8> = DoubleBuf::new();
-let (mut back, mut front) = db.init();
+let (back, front) = db.init();
 let mut writer = back.write();
 let reader = front.read();
 // Both are initialized with the default value

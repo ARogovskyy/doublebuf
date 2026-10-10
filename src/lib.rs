@@ -351,6 +351,11 @@ impl<T> Drop for ReadGuard<'_, '_, T> {
     }
 }
 
+// Run the README code example as a doctest so that it cannot drift from the crate docs.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+mod readme_doctest {}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -368,6 +373,63 @@ mod tests {
     // do not allow `!Send` types like `Rc` to be sent across threads
     static_assertions::assert_not_impl_any!(Accessor<std::rc::Rc<u8>>: Send);
 
+    // The guards hold raw pointers into the buffer and a reference to the (`!Sync`) accessor,
+    // so they must never cross a thread boundary
+    static_assertions::assert_not_impl_any!(ReadGuard<'static, 'static, u8>: Send, Sync);
+    static_assertions::assert_not_impl_any!(WriteGuard<'static, 'static, u8>: Send, Sync);
+
+    #[test]
+    fn test_both_write() {
+        let mut db: DoubleBuf<u8> = DoubleBuf::new();
+        let (a, b) = db.init();
+
+        // a writes buf1 and triggers a swap on drop; b now sees it
+        *a.write() = 1;
+        assert_eq!(*b.read(), 1);
+
+        // b writes it back; another swap, a sees it, b is left with the never-written buffer
+        *b.write() = 2;
+        assert_eq!(*a.read(), 2);
+        assert_eq!(*b.read(), 0);
+
+        // both hold write guards at the same time: no swap until the last one is dropped
+        let mut wa = a.write();
+        let mut wb = b.write();
+        *wa = 10;
+        *wb = 20;
+        drop(wa);
+        assert_eq!(*wb, 20);
+        drop(wb);
+        assert_eq!(*a.read(), 20);
+        assert_eq!(*b.read(), 10);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_double_init() {
+        let mut db: DoubleBuf<u8> = DoubleBuf::new();
+        let _ = db.init();
+        // the accessors are gone, so the borrow checker allows this; the runtime check must not
+        let _ = db.init();
+    }
+
+    #[test]
+    fn test_const_context() {
+        // `DoubleBuf<T: Send>` is `Sync`, so it can live in a `static` ...
+        static STATIC_DB: DoubleBuf<u8> = DoubleBuf::from_values(1, 2);
+        // ... and `from_values` / `init` are usable in `const` contexts
+        const _: () = {
+            let mut db = DoubleBuf::from_values(1u8, 2u8);
+            let (_a, _b) = db.init();
+        };
+
+        let _ = &STATIC_DB;
+        let mut db = DoubleBuf::from_values(1u8, 2u8);
+        let (a, b) = db.init();
+        // `buf1` is associated with `init().0` and `buf2` with `init().1`, as documented
+        assert_eq!(*a.read(), 1);
+        assert_eq!(*b.read(), 2);
+    }
 
     #[test]
     fn test_swap() {

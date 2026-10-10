@@ -41,6 +41,7 @@
 
 use core::{
     cell::{Cell, UnsafeCell},
+    fmt,
     ops::{Deref, DerefMut},
 };
 
@@ -221,6 +222,44 @@ unsafe impl<T: Send> Sync for DoubleBuf<T> {}
 impl<T: Default> Default for DoubleBuf<T> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// The contents are not printed, could be a data race
+impl<T> fmt::Debug for DoubleBuf<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = critical_section::with(|cs| self.state.0.borrow(cs).get());
+        f.debug_struct("DoubleBuf")
+            .field("initialized", &self.initialized)
+            .field("is_dirty", &state.is_dirty)
+            .field("active_guards", &state.counter)
+            .field("swapped", &state.swapped)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> fmt::Debug for Accessor<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Accessor")
+            .field(
+                "default_buffer",
+                &if self.access_buf1_by_def { 1 } else { 2 },
+            )
+            .field("is_active", &self.is_active.get())
+            .finish_non_exhaustive()
+    }
+}
+
+// Like `MutexGuard`, the guards format as the value they point to.
+impl<T: fmt::Debug> fmt::Debug for ReadGuard<'_, '_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for WriteGuard<'_, '_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
     }
 }
 

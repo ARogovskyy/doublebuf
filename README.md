@@ -1,10 +1,12 @@
-# Concurrent auto-swapping double buffer
+# Concurrent auto-swapping zero-copy double buffer
 
 > Warning: Until this crate reaches version `1.0` it should be considered WIP-grade.
 
 This crate provides a double buffer. Differences to existing implementations:
+
 - Unlike channels, the access is by-reference and not by-value
 - Thread-safe (no need for additional synchronization, with the double buffer providing interior-mutability by default)
+- Zero-copy, no `Clone` required
 - Auto-swapping: Whenever the writer finishes writing, the buffers are swapped on the next possible opportunity (when no readers or writers are active)
 - `no_std` compatible (needs a `critical_section` implementation)
 

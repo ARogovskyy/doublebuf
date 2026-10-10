@@ -1,7 +1,7 @@
 //! This crate implements a thread-safe double buffer with automatic swapping.
 //!
 //! [`DoubleBuf`] is a data structure with two buffers (buffer 1 and buffer 2) and two [users](Accessor),
-//! each having exclusive access to one of the buffers. The users can request [read](Accessor::read) or [write](Accessor::write) access
+//! each having exclusive by-reference access to one of the buffers. The users can request [read](Accessor::read) or [write](Accessor::write) access
 //! to the underlying buffer (we say that a user is _active_ while it keeps this access), such that the following holds:
 //!
 //! _Whenever both users are inactive with at least one having requested [write](Accessor::write) access since the last swap,

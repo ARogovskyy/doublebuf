@@ -1,4 +1,4 @@
-//! This crate implements a thread-safe double buffer with automatic swapping.
+//! This crate implements a zero-copy thread-safe double buffer with automatic swapping.
 //!
 //! [`DoubleBuf`] is a data structure with two buffers (buffer 1 and buffer 2) and two [users](Accessor),
 //! each having exclusive by-reference access to one of the buffers. The users can request [read](Accessor::read) or [write](Accessor::write) access
@@ -9,7 +9,7 @@
 //!
 //! Note that while we use the term "buffer", any type `T` is allowed.
 //!
-//! # Usage
+//! # Example
 //! ```
 //! use doublebuf::*;
 //! let mut db: DoubleBuf<u8> = DoubleBuf::new();
@@ -19,7 +19,6 @@
 //! // Both are initialized with the default value
 //! assert_eq!(*reader, 0);
 //! assert_eq!(*writer, 0);
-//!
 //! *writer = 5;
 //! drop(writer);
 //! drop(reader);
@@ -31,7 +30,9 @@
 //! # Notes
 //! - `no_std` usage is explicitly allowed.
 //! - The implementation is lock-free on targets with atomic compare-and-swap on single bytes.
-//!   - On targets without a native compare-and-swap (e.g. `thumbv6m`, AVR), the application must configure one of [`portable-atomic`'s fallbacks](https://docs.rs/portable-atomic), e.g. its `critical-section` feature together with a `critical-section` implementation.
+//!   On targets without a native compare-and-swap (e.g. `thumbv6m`, AVR), the application must configure one of
+//!   [`portable-atomic`'s fallbacks](https://docs.rs/portable-atomic#optional-features), e.g. its `critical-section`
+//!   feature together with a `critical-section` implementation.
 //! - While double buffers conventionally have a "front" and a "back" buffer (the back buffer being used by the producer and
 //!   the front buffer by the consumer), our implementation is completely symmetric.
 //! - The buffers are not swapped if there has been no [write](Accessor::write) access since the last swap.

@@ -6,26 +6,29 @@ This crate provides a double buffer. Differences to existing implementations:
 
 - Unlike channels, the access is by-reference and not by-value
 - Thread-safe (no need for additional synchronization, with the double buffer providing interior-mutability by default)
-- Zero-copy, no `Clone` required
-- Auto-swapping: Whenever the writer finishes writing, the buffers are swapped on the next possible opportunity (when no readers or writers are active)
-- Lock-free: all bookkeeping is a single atomic byte
+- Zero-copy, no `Clone` required; any type `T` can be buffered
+- Auto-swapping: Whenever a write access finishes, the buffers are swapped on the next possible opportunity (when neither side is active)
+- Symmetric: both sides can read and write, there is no fixed producer / consumer role
+- Lock-free: all bookkeeping is a single atomic byte, on targets with an atomic compare-and-swap
 - `no_std` compatible
 
-## Usage:
+See the [documentation](https://docs.rs/doublebuf) for the exact swap semantics and caveats.
+
+## Usage
 
 ```toml
 doublebuf = "0.1"
 ```
 
 The atomics are provided by [`portable-atomic`](https://docs.rs/portable-atomic). On targets with a native atomic
-compare-and-swap nothing else is needed. On targets without a native compare-and-swap (e.g. `thumbv6m`, AVR), the application must configure one of [`portable-atomic`'s fallbacks](https://docs.rs/portable-atomic), e.g. its `critical-section` feature together with a `critical-section` implementation.
+compare-and-swap nothing else is needed. On targets without one (e.g. `thumbv6m`, AVR), the application must configure
+one of [`portable-atomic`'s fallbacks](https://docs.rs/portable-atomic#optional-features), e.g. its `critical-section`
+feature together with a `critical-section` implementation:
 
 ```toml
 portable-atomic = { version = "1", features = ["critical-section"] }
 critical-section = "1" # plus an implementation
 ```
-
-See the [`portable-atomic` documentation](https://docs.rs/portable-atomic#optional-features) for the available options.
 
 ## Example
 

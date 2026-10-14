@@ -8,16 +8,26 @@ This crate provides a double buffer. Differences to existing implementations:
 - Thread-safe (no need for additional synchronization, with the double buffer providing interior-mutability by default)
 - Zero-copy, no `Clone` required
 - Auto-swapping: Whenever the writer finishes writing, the buffers are swapped on the next possible opportunity (when no readers or writers are active)
-- `no_std` compatible (needs a `critical_section` implementation)
+- Lock-free: all bookkeeping is a single atomic byte
+- `no_std` compatible
 
-Usage:
+## Usage:
 
-On `std`, enable the `std` feature:
 ```toml
-doublebuf = { version = "0.1", features = ["std"] }
+doublebuf = "0.1"
 ```
-On `no_std`, leave the feature off and provide a `critical-section` implementation.
 
+The atomics are provided by [`portable-atomic`](https://docs.rs/portable-atomic). On targets with a native atomic
+compare-and-swap nothing else is needed. On targets without a native compare-and-swap (e.g. `thumbv6m`, AVR), the application must configure one of [`portable-atomic`'s fallbacks](https://docs.rs/portable-atomic), e.g. its `critical-section` feature together with a `critical-section` implementation.
+
+```toml
+portable-atomic = { version = "1", features = ["critical-section"] }
+critical-section = "1" # plus an implementation
+```
+
+See the [`portable-atomic` documentation](https://docs.rs/portable-atomic#optional-features) for the available options.
+
+## Example
 
 ```rust
 use doublebuf::*;

@@ -29,8 +29,9 @@
 //! ```
 //!
 //! # Notes
-//! - `no_std` usage is explicitly allowed, but a [`critical_section`] implementation must be provided.
-//! - In `std` contexts, enable this crate's `std` feature, which selects the `std` implementation of [`critical_section`].
+//! - `no_std` usage is explicitly allowed.
+//! - The implementation is lock-free on targets with atomic compare-and-swap on single bytes.
+//!   - On targets without a native compare-and-swap (e.g. `thumbv6m`, AVR), the application must configure one of [`portable-atomic`'s fallbacks](https://docs.rs/portable-atomic), e.g. its `critical-section` feature together with a `critical-section` implementation.
 //! - While double buffers conventionally have a "front" and a "back" buffer (the back buffer being used by the producer and
 //!   the front buffer by the consumer), our implementation is completely symmetric.
 //! - The buffers are not swapped if there has been no [write](Accessor::write) access since the last swap.
@@ -42,26 +43,154 @@
 use core::{
     cell::{Cell, UnsafeCell},
     fmt,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
 };
 
-use critical_section::Mutex;
+use portable_atomic::{AtomicU8, Ordering};
 
-#[derive(Clone, Copy, Debug)]
-struct StateInner {
-    is_dirty: bool,
-    counter: u8,
-    swapped: bool,
+/// Identifies one of the two accessors by the buffer it is associated with by default (i.e. upon initialization, while not swapped).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Side {
+    Buf1 = 1,
+    Buf2 = 2,
 }
 
-// use critical_section::Mutex instead of embassy's blocking_mutex::CriticalSectionMutex
-// They are pretty similar, but we can use the former in std environments too, making the
-// double buffer better testable
-struct State(critical_section::Mutex<Cell<StateInner>>);
+impl Side {
+    /// The `ACTIVE` bit of this side in the [`State`].
+    const fn active_bit(self) -> u8 {
+        match self {
+            Side::Buf1 => StateInner::ACTIVE_1,
+            Side::Buf2 => StateInner::ACTIVE_2,
+        }
+    }
+
+    /// 1 or 2, for diagnostics.
+    const fn number(self) -> u8 {
+        self as u8
+    }
+}
+
+/// A plain copy of the [`State`] bits, for inspecting it and for computing transitions.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StateInner(u8);
+
+/// We pack the state in a single byte as follows:
+/// ****SDAB (in big endian)
+/// - S is the swapped bit
+/// - D is the dirty bit
+/// - A and B are the active bits for the two accessors
+impl StateInner {
+    /// Set while the accessor associated with buffer 1 by default holds a guard.
+    const ACTIVE_1: u8 = 1 << 0;
+    /// Set while the accessor associated with buffer 2 by default holds a guard.
+    const ACTIVE_2: u8 = 1 << 1;
+    const ACTIVE_ANY: u8 = Self::ACTIVE_1 | Self::ACTIVE_2;
+    /// Set when there has been a write access since the last swap.
+    const DIRTY: u8 = 1 << 2;
+    /// Set when the buffers are currently swapped relative to their default association.
+    const SWAPPED: u8 = 1 << 3;
+
+    /// Whether the accessor of the given side currently holds a guard.
+    const fn is_active(self, side: Side) -> bool {
+        self.0 & side.active_bit() != 0
+    }
+
+    /// Whether any accessor currently holds a guard.
+    const fn is_any_active(self) -> bool {
+        self.0 & Self::ACTIVE_ANY != 0
+    }
+
+    /// Whether there has been a write access since the last swap.
+    const fn is_dirty(self) -> bool {
+        self.0 & Self::DIRTY != 0
+    }
+
+    /// Whether the buffers are currently swapped relative to their default association.
+    const fn is_swapped(self) -> bool {
+        self.0 & Self::SWAPPED != 0
+    }
+
+    // The transitions below are pure; `State` applies them atomically.
+
+    const fn with_active(self, side: Side) -> Self {
+        Self(self.0 | side.active_bit())
+    }
+
+    const fn with_inactive(self, side: Side) -> Self {
+        Self(self.0 & !side.active_bit())
+    }
+
+    const fn with_dirty(self) -> Self {
+        Self(self.0 | Self::DIRTY)
+    }
+
+    /// Swaps the buffers, which also clears the dirty flag.
+    const fn with_swapped(self) -> Self {
+        Self((self.0 & !Self::DIRTY) ^ Self::SWAPPED)
+    }
+}
+
+/// The complete state of the double buffer, packed into one byte so that every transition is a single
+/// atomic read-modify-write (see the safety argument below).
+struct State(AtomicU8);
+
+impl State {
+    const fn new() -> Self {
+        Self(AtomicU8::new(0))
+    }
+
+    /// A snapshot for diagnostics. It may be stale by the time it is inspected.
+    fn snapshot(&self) -> StateInner {
+        StateInner(self.0.load(Ordering::Relaxed))
+    }
+
+    /// Atomically marks the given side as active (and sets the dirty flag in case of write access) and
+    /// returns whether the buffers are swapped, as observed in that same transition.
+    /// Returns `None` without changing anything if the side is already active.
+    fn try_acquire(&self, side: Side, is_write: bool) -> Option<bool> {
+        // The failure ordering can be relaxed: on failure we either retry (and the retried compare-and-swap
+        // carries the ordering) or return without touching the buffer.
+        let prev = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |s| {
+                let s = StateInner(s);
+                if s.is_active(side) {
+                    return None;
+                }
+                let s = s.with_active(side);
+                Some(if is_write { s.with_dirty() } else { s }.0)
+            })
+            .ok()?;
+        // SWAPPED is not changed by the transition above, so the previous value is the current one.
+        Some(StateInner(prev).is_swapped())
+    }
+
+    /// Atomically marks the given side as inactive. If the other side is inactive too and there has been a
+    /// write access since the last swap, the buffers are swapped in the same transition.
+    fn release(&self, side: Side) {
+        // The closure never returns `None`, so this cannot fail.
+        let _ = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |s| {
+                let s = StateInner(s);
+                debug_assert!(s.is_active(side), "release implies the accessor is active");
+                let s = s.with_inactive(side);
+                Some(
+                    if !s.is_any_active() && s.is_dirty() {
+                        s.with_swapped()
+                    } else {
+                        s
+                    }
+                    .0,
+                )
+            });
+    }
+}
 
 /// A thread-safe double buffer with automatic swapping. See [module-level documentation](`crate`) for general notes.
 /// The usual workflow is as follows:
-/// - Construct using [`new`](`DoubleBuf::new`) or [`new_with`](`DoubleBuf::new_with`).
+/// - Construct using [`new`](`DoubleBuf::new`), [`new_with`](`DoubleBuf::new_with`) or [`from_values`](`DoubleBuf::from_values`).
 /// - Call [`init`](`DoubleBuf::init`) once to obtain the [`Accessors`](`Accessor`).
 /// - On the `Accessor`s, call [`read`](`Accessor::read`) and [`write`](`Accessor::write`) as required. It is advisable
 ///   to hold the guards returned by those methods for as short as possible.
@@ -86,40 +215,43 @@ pub struct DoubleBuf<T> {
 ///
 /// ## Thread Safety
 /// Accessor is `Send`, so you can safely send them to another thread (which is one of the primary driving use cases for a double buffer).
+/// Only one guard per accessor can exist at a time; this is checked at runtime.
 ///
 /// Note that currently, `Accessor` itself is not `Sync`.
 pub struct Accessor<'db, T> {
     inner: &'db DoubleBuf<T>,
-    access_buf1_by_def: bool,
-    is_active: Cell<bool>,
+    side: Side,
+    // Opt-out of `Accessor: Sync` for now to keep the API as it was
+    _not_sync: PhantomData<Cell<()>>,
 }
-
 pub struct WriteGuard<'ac, 'db, T> {
-    // Conceptually, this should be a &mut reference, but we want to enable this check to be done during runtime.
-    // We make sure it is unique in `Accessor::prepare_access` by preventing reentrant calls to read/write.
+    // Conceptually, this should be a &mut reference, but we want to enable this check to be done during runtime: `Accessor::try_acquire` guarantees that there is at most one guard per accessor, and therefore per buffer.
     accessor: &'ac Accessor<'db, T>,
     inner: *mut T,
 }
 
 pub struct ReadGuard<'ac, 'db, T> {
-    // Conceptually, this should be a &mut reference, but we want to enable this check to be done during runtime.
-    // We make sure it is unique in `Accessor::prepare_access` by preventing reentrant calls to read/write.
+    // Conceptually, this should be a &mut reference, but we want to enable this check to be done during runtime: `Accessor::try_acquire` guarantees that there is at most one guard per accessor, and therefore per buffer.
     accessor: &'ac Accessor<'db, T>,
     inner: *const T,
 }
 
 // Safety: We need to show that the (1) reference points to valid data and that (2) Rust's aliasing rules are upheld.
 // (1) The pointer was created from valid data inside an `UnsafeCell` inside
-// `DoubleBuf`. The data has not been moved away or invalidated in any way because the guards have have a
-// reference to the Accessor which in turn has a reference to the `DoubleBuf`.
+// `DoubleBuf`. The data has not been moved away or invalidated in any way because the guards have a reference to the Accessor which in turn has a reference to the `DoubleBuf`.
 // (2) This consists of two parts:
-// - No two Accessors are associated with the same buffer. This is due to the fact the two Accessors
-//   are initially associated to different buffers and the swap happens atomically with exclusive access to the state.
-// - At most one guard per accessor: In the current implementation, this is checked at runtime in the read and write
-//   methods by setting a flag (`is_active`). This is safe because we ensure that `Accessor: !Sync`. In the future,
-//   it might be `Sync` if we instead use an AtomicBool.
+// - At most one guard per accessor: `try_acquire` sets the accessor's ACTIVE bit in a compare-and-swap that
+//   fails if the bit is already set, and the bit is only cleared when the guard is dropped.
+// - No two accessors are associated with the same buffer: the two accessors are initially associated with
+//   different buffers, and the SWAPPED bit only flips in the same atomic transition that clears the last
+//   ACTIVE bit. Every acquire reads SWAPPED in the same atomic transition that sets its ACTIVE bit. Hence all
+//   guards that are alive at the same time were created under the same value of SWAPPED and therefore point to
+//   different buffers.
 // - Taken together, these two imply that there is at most one guard (regardless of type) per buffer, which is a stronger
-//   requirements than Rust's aliasing rules.
+//   requirement than Rust's aliasing rules.
+// Memory ordering: every transition is an AcqRel read-modify-write on the same atomic. Each one therefore
+// synchronizes-with the transition that produced the value it read, so a release (which follows all accesses to
+// the buffer through the guard) happens-before every later acquire, including those that find the buffers swapped.
 
 impl<T> Deref for ReadGuard<'_, '_, T> {
     type Target = T;
@@ -157,11 +289,7 @@ impl<T> DoubleBuf<T> {
     pub const fn from_values(buf1: T, buf2: T) -> DoubleBuf<T> {
         DoubleBuf {
             initialized: false,
-            state: State(Mutex::new(Cell::new(StateInner {
-                is_dirty: false,
-                counter: 0,
-                swapped: false,
-            }))),
+            state: State::new(),
             buf1: UnsafeCell::new(buf1),
             buf2: UnsafeCell::new(buf2),
         }
@@ -170,16 +298,7 @@ impl<T> DoubleBuf<T> {
     /// Constructs a new double buffer with the two buffers containing the values produced by the predicates.
     /// Note that by default, `buf1` will be associated with the user `init().0` and `buf2` with `init().1` (until they are swapped).
     pub fn new_with(buf1: impl FnOnce() -> T, buf2: impl FnOnce() -> T) -> DoubleBuf<T> {
-        DoubleBuf {
-            initialized: false,
-            state: State(Mutex::new(Cell::new(StateInner {
-                is_dirty: false,
-                counter: 0,
-                swapped: false,
-            }))),
-            buf1: UnsafeCell::new(buf1()),
-            buf2: UnsafeCell::new(buf2()),
-        }
+        Self::from_values(buf1(), buf2())
     }
 
     /// Initializes the double buffer, returning the accessors.
@@ -195,14 +314,14 @@ impl<T> DoubleBuf<T> {
         self.initialized = true;
         (
             Accessor {
-                access_buf1_by_def: true,
+                side: Side::Buf1,
                 inner: self,
-                is_active: Cell::new(false),
+                _not_sync: PhantomData,
             },
             Accessor {
-                access_buf1_by_def: false,
+                side: Side::Buf2,
                 inner: self,
-                is_active: Cell::new(false),
+                _not_sync: PhantomData,
             },
         )
     }
@@ -228,24 +347,23 @@ impl<T: Default> Default for DoubleBuf<T> {
 // The contents are not printed, could be a data race
 impl<T> fmt::Debug for DoubleBuf<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state = critical_section::with(|cs| self.state.0.borrow(cs).get());
+        let state = self.state.snapshot();
         f.debug_struct("DoubleBuf")
             .field("initialized", &self.initialized)
-            .field("is_dirty", &state.is_dirty)
-            .field("active_guards", &state.counter)
-            .field("swapped", &state.swapped)
+            .field("active_1", &state.is_active(Side::Buf1))
+            .field("active_2", &state.is_active(Side::Buf2))
+            .field("is_dirty", &state.is_dirty())
+            .field("swapped", &state.is_swapped())
             .finish_non_exhaustive()
     }
 }
 
 impl<T> fmt::Debug for Accessor<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.inner.state.snapshot();
         f.debug_struct("Accessor")
-            .field(
-                "default_buffer",
-                &if self.access_buf1_by_def { 1 } else { 2 },
-            )
-            .field("is_active", &self.is_active.get())
+            .field("default_buffer", &self.side.number())
+            .field("is_active", &state.is_active(self.side))
             .finish_non_exhaustive()
     }
 }
@@ -264,27 +382,14 @@ impl<T: fmt::Debug> fmt::Debug for WriteGuard<'_, '_, T> {
 }
 
 impl<'db, T> Accessor<'db, T> {
-    fn prepare_access(&self, is_write: bool) -> *mut T {
-        if self.is_active.get() {
-            panic!(
-                "Accessor is already active. The read / write methods must not be called reentrantly"
-            );
-        }
-        self.is_active.set(true);
-        let swapped = critical_section::with(|cs| {
-            let s = self.inner.state.0.borrow(cs);
-            let mut state = s.get();
-            if state.counter >= 2 {
-                unreachable!("max one writer")
-            }
-            state.counter += 1;
-            if is_write {
-                state.is_dirty = true;
-            }
-            s.set(state);
-            state.swapped
-        });
-        if self.access_buf1_by_def ^ swapped {
+    /// Marks this accessor as active and returns the buffer it is currently associated with.
+    ///
+    /// Panics (without changing anything) if the accessor is already active.
+    fn acquire(&self, is_write: bool) -> *mut T {
+        let swapped = self.inner.state.try_acquire(self.side, is_write).expect(
+            "Accessor is already active. The read / write methods must not be called reentrantly",
+        );
+        if (self.side == Side::Buf1) ^ swapped {
             self.inner.buf1.get()
         } else {
             self.inner.buf2.get()
@@ -301,10 +406,10 @@ impl<'db, T> Accessor<'db, T> {
     /// ## Panics:
     /// If the accessor is already active. There can only be one guard; you must drop the old one before calling `read` or `write` again.
     pub fn write<'ac>(&'ac self) -> WriteGuard<'ac, 'db, T> {
-        let buf = self.prepare_access(true);
+        let inner = self.acquire(true);
         WriteGuard {
             accessor: self,
-            inner: buf,
+            inner,
         }
     }
 
@@ -313,41 +418,23 @@ impl<'db, T> Accessor<'db, T> {
     /// ## Panics:
     /// If the accessor is already active. There can only be one guard; you must drop the old one before calling `read` or `write` again.
     pub fn read<'ac>(&'ac self) -> ReadGuard<'ac, 'db, T> {
-        let buf = self.prepare_access(false);
+        let inner = self.acquire(false);
         ReadGuard {
             accessor: self,
-            inner: buf,
+            inner,
         }
     }
 }
 
-fn drop_guard(state: &State) {
-    critical_section::with(|cs| {
-        let s = state.0.borrow(cs);
-        let mut state = s.get();
-        if state.counter == 0 {
-            unreachable!("guard drop implies counter >= 1")
-        }
-        state.counter -= 1;
-        if state.counter == 0 && state.is_dirty {
-            state.is_dirty = false;
-            state.swapped = !state.swapped;
-        }
-        s.set(state);
-    });
-}
-
 impl<T> Drop for WriteGuard<'_, '_, T> {
     fn drop(&mut self) {
-        self.accessor.is_active.set(false);
-        drop_guard(&self.accessor.inner.state);
+        self.accessor.inner.state.release(self.accessor.side);
     }
 }
 
 impl<T> Drop for ReadGuard<'_, '_, T> {
     fn drop(&mut self) {
-        self.accessor.is_active.set(false);
-        drop_guard(&self.accessor.inner.state);
+        self.accessor.inner.state.release(self.accessor.side);
     }
 }
 

@@ -42,9 +42,8 @@
 #![no_std]
 
 use core::{
-    cell::{Cell, UnsafeCell},
+    cell::UnsafeCell,
     fmt,
-    marker::PhantomData,
     ops::{Deref, DerefMut},
 };
 
@@ -225,15 +224,12 @@ pub struct DoubleBuf<T> {
 /// methods.
 ///
 /// ## Thread Safety
-/// Accessor is `Send`, so you can safely send them to another thread (which is one of the primary driving use cases for a double buffer).
+/// `Accessor` is `Send` (and `Sync`) for `T: Send`, so you can send it to another thread (which is one of the primary driving use cases for a double buffer).
 /// Only one guard per accessor can exist at a time; this is checked at runtime.
-///
-/// Note that currently, `Accessor` itself is not `Sync`.
+/// Sharing a single `Accessor` between threads is possible. In that case, the first `read` / `write` call wins.
 pub struct Accessor<'db, T> {
     inner: &'db DoubleBuf<T>,
     side: Side,
-    // Opt-out of `Accessor: Sync` for now to keep the API as it was
-    _not_sync: PhantomData<Cell<()>>,
 }
 pub struct WriteGuard<'ac, 'db, T> {
     // Conceptually, this should be a &mut reference, but we want to enable this check to be done during runtime: `Accessor::try_acquire` guarantees that there is at most one guard per accessor, and therefore per buffer.
@@ -339,12 +335,10 @@ impl<T> DoubleBuf<T> {
             Accessor {
                 side: Side::Buf1,
                 inner: self,
-                _not_sync: PhantomData,
             },
             Accessor {
                 side: Side::Buf2,
                 inner: self,
-                _not_sync: PhantomData,
             },
         )
     }
@@ -478,14 +472,12 @@ mod tests {
         thread::{self},
     };
 
-    static_assertions::assert_impl_one!(Accessor<u8>: Send);
-    static_assertions::assert_not_impl_any!(Accessor<u8>: Sync);
+    // `Accessor` can be sent to and shared with other threads (the atomic active bit arbitrates)
+    static_assertions::assert_impl_all!(Accessor<u8>: Send, Sync);
+    // ... but not for `!Send` types like `Rc`, which must not cross thread boundaries (it's unclear why anyone would even use an Rc here)
+    static_assertions::assert_not_impl_any!(Accessor<std::rc::Rc<u8>>: Send, Sync);
 
-    // do not allow `!Send` types like `Rc` to be sent across threads
-    static_assertions::assert_not_impl_any!(Accessor<std::rc::Rc<u8>>: Send);
-
-    // The guards hold raw pointers into the buffer and a reference to the (`!Sync`) accessor,
-    // so they must never cross a thread boundary
+    // The guards hold raw pointers into the buffer and are deliberately kept on the thread that created them
     static_assertions::assert_not_impl_any!(ReadGuard<'static, 'static, u8>: Send, Sync);
     static_assertions::assert_not_impl_any!(WriteGuard<'static, 'static, u8>: Send, Sync);
 

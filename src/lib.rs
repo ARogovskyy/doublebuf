@@ -245,7 +245,8 @@ pub struct DoubleBuf<T> {
 /// ## Thread Safety
 /// `Accessor` is `Send` (and `Sync`) for `T: Send`, so you can send it to another thread (which is one of the primary driving use cases for a double buffer).
 /// Only one guard per accessor can exist at a time; this is checked at runtime.
-/// Sharing a single `Accessor` between threads is possible. In that case, the first `read` / `write` call wins.
+/// Sharing a single `Accessor` between threads is possible. In that case, the first `read` / `write` call wins;
+/// use [`try_read`](Accessor::try_read) / [`try_write`](Accessor::try_write) on the side that must not panic.
 pub struct Accessor<'db, T> {
     inner: &'db DoubleBuf<T>,
     side: Side,
@@ -419,16 +420,14 @@ impl<T: fmt::Debug> fmt::Debug for WriteGuard<'_, '_, T> {
 impl<'db, T> Accessor<'db, T> {
     /// Marks this accessor as active and returns the buffer it is currently associated with.
     ///
-    /// Panics (without changing anything) if the accessor is already active.
-    fn acquire(&self, is_write: bool) -> *mut T {
-        let swapped = self.inner.state.try_acquire(self.side, is_write).expect(
-            "Accessor is already active. The read / write methods must not be called reentrantly",
-        );
-        if (self.side == Side::Buf1) ^ swapped {
+    /// Returns `None` (without changing anything) if the accessor is already active.
+    fn try_acquire(&self, is_write: bool) -> Option<*mut T> {
+        let swapped = self.inner.state.try_acquire(self.side, is_write)?;
+        Some(if (self.side == Side::Buf1) ^ swapped {
             self.inner.buf1.get()
         } else {
             self.inner.buf2.get()
-        }
+        })
     }
 
     /// Accesses the current associated buffer for writing. The accessor is _active_ as long as the returned guard exists.
@@ -440,24 +439,42 @@ impl<'db, T> Accessor<'db, T> {
     ///
     /// ## Panics:
     /// If the accessor is already active. There can only be one guard; you must drop the old one before calling `read` or `write` again.
+    /// See [`try_write`](Self::try_write) for a non-panicking variant.
     pub fn write<'ac>(&'ac self) -> WriteGuard<'ac, 'db, T> {
-        let inner = self.acquire(true);
-        WriteGuard {
+        self.try_write().expect(
+            "Accessor is already active. The read / write methods must not be called reentrantly",
+        )
+    }
+
+    /// Like [`write`](Self::write), but returns `None` instead of panicking if the accessor is already active.
+    /// A failed attempt has no effect; in particular, it does not mark the double buffer dirty for swapping.
+    pub fn try_write<'ac>(&'ac self) -> Option<WriteGuard<'ac, 'db, T>> {
+        let inner = self.try_acquire(true)?;
+        Some(WriteGuard {
             accessor: self,
             inner,
-        }
+        })
     }
 
     /// Accesses the current associated buffer for reading. The accessor is _active_ as long as the returned guard exists.
     ///
     /// ## Panics:
     /// If the accessor is already active. There can only be one guard; you must drop the old one before calling `read` or `write` again.
+    /// See [`try_read`](Self::try_read) for a non-panicking variant.
     pub fn read<'ac>(&'ac self) -> ReadGuard<'ac, 'db, T> {
-        let inner = self.acquire(false);
-        ReadGuard {
+        self.try_read().expect(
+            "Accessor is already active. The read / write methods must not be called reentrantly",
+        )
+    }
+
+    /// Like [`read`](Self::read), but returns `None` instead of panicking if the accessor is already active.
+    /// A failed attempt has no effect.
+    pub fn try_read<'ac>(&'ac self) -> Option<ReadGuard<'ac, 'db, T>> {
+        let inner = self.try_acquire(false)?;
+        Some(ReadGuard {
             accessor: self,
             inner,
-        }
+        })
     }
 }
 
@@ -552,6 +569,61 @@ mod tests {
         // `buf1` is associated with `init().0` and `buf2` with `init().1`, as documented
         assert_eq!(*a.read(), 1);
         assert_eq!(*b.read(), 2);
+    }
+
+    #[test]
+    fn test_try_access() {
+        let db: DoubleBuf<u8> = DoubleBuf::new();
+        let (a, b) = db.init();
+
+        let guard = a.read();
+        // the same accessor is active, so both variants fail
+        assert!(a.try_read().is_none());
+        assert!(a.try_write().is_none());
+        // ...while the other accessor is unaffected
+        assert!(b.try_write().is_some());
+        drop(guard);
+        // and after the guard is gone, the accessor is usable again
+        assert!(a.try_write().is_some());
+        assert!(a.try_read().is_some());
+    }
+
+    #[test]
+    fn test_try_write_failure_does_not_dirty() {
+        let db: DoubleBuf<u8> = DoubleBuf::new();
+        let (a, b) = db.init();
+        *b.write() = 5; // swap: a -> buf2 (5), b -> buf1 (0)
+        let guard = a.read();
+        assert_eq!(*guard, 5);
+        assert!(a.try_write().is_none());
+        drop(guard);
+        // had the failed try_write set the dirty flag, the drop above would have swapped
+        assert_eq!(*a.read(), 5);
+    }
+
+    #[test]
+    fn test_accessor_shared_between_threads() {
+        let db: DoubleBuf<u8> = DoubleBuf::new();
+        let (a, _b) = db.init();
+        let barrier = Barrier::new(2);
+
+        // `Accessor: Sync`: one accessor is shared by reference between two threads, the atomic
+        // active bit arbitrates between them.
+        thread::scope(|s| {
+            s.spawn(|| {
+                let w = a.write();
+                barrier.wait();
+                // main thread tries (and fails) to use `a` now
+                barrier.wait();
+                drop(w);
+            });
+            barrier.wait();
+            assert!(a.try_read().is_none());
+            assert!(a.try_write().is_none());
+            barrier.wait();
+        });
+        // the other thread's guard is gone
+        assert!(a.try_read().is_some());
     }
 
     #[test]

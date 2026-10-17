@@ -48,6 +48,9 @@ use core::{
     ops::{Deref, DerefMut},
 };
 
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicU8, Ordering};
+#[cfg(not(loom))]
 use portable_atomic::{AtomicU8, Ordering};
 
 /// Identifies one of the two accessors by the buffer it is associated with by default (i.e. upon initialization, while not swapped).
@@ -137,7 +140,14 @@ impl StateInner {
 struct State(AtomicU8);
 
 impl State {
+    #[cfg(not(loom))]
     const fn new() -> Self {
+        Self(AtomicU8::new(0))
+    }
+
+    // loom's atomics cannot be constructed in `const` contexts
+    #[cfg(loom)]
+    fn new() -> Self {
         Self(AtomicU8::new(0))
     }
 
@@ -154,7 +164,7 @@ impl State {
         // carries the ordering) or return without touching the buffer.
         let prev = self
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |s| {
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |s: u8| {
                 let s = StateInner(s);
                 if s.is_active(side) {
                     return None;
@@ -287,7 +297,19 @@ impl<T> DoubleBuf<T> {
 
     /// Constructs a new double buffer from the two provided values. Useful in `const` contexts.
     /// Note that by default, `buf1` will be associated with the user `init().0` and `buf2` with `init().1` (until they are swapped).
+    #[cfg(not(loom))]
     pub const fn from_values(buf1: T, buf2: T) -> DoubleBuf<T> {
+        DoubleBuf {
+            initialized: false,
+            state: State::new(),
+            buf1: UnsafeCell::new(buf1),
+            buf2: UnsafeCell::new(buf2),
+        }
+    }
+
+    // loom's atomics cannot be constructed in `const` contexts
+    #[cfg(loom)]
+    pub fn from_values(buf1: T, buf2: T) -> DoubleBuf<T> {
         DoubleBuf {
             initialized: false,
             state: State::new(),
@@ -444,7 +466,8 @@ impl<T> Drop for ReadGuard<'_, '_, T> {
 #[doc = include_str!("../README.md")]
 mod readme_doctest {}
 
-#[cfg(test)]
+// The unit tests use real threads and `const` construction, which do not work under loom.
+#[cfg(all(test, not(loom)))]
 mod tests {
     extern crate std;
 

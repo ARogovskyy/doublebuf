@@ -13,8 +13,16 @@ repository = "https://github.com/ARogovskyy/doublebuf"
 
 [dependencies]
 # We need an atomic compare-and-swap. On targets without a native one, the application must configure
-# a fallback (e.g. the `critical-section` feature of portable-atomic); see the README.
+# a fallback (e.g. the `critical-section` feature of `portable-atomic`); see the README.
 portable-atomic = { version = "1.3", default-features = false, features = ["require-cas"] }
+
+# To use loom, compile with `RUSTFLAGS="--cfg loom"`.
+# It has to be a normal (not dev-) dependency because the library itself switches to loom's atomics.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
 
 [dev-dependencies]
 static_assertions = "1.1.0"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

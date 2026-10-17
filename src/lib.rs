@@ -12,7 +12,7 @@
 //! # Example
 //! ```
 //! use doublebuf::*;
-//! let mut db: DoubleBuf<u8> = DoubleBuf::new();
+//! let db: DoubleBuf<u8> = DoubleBuf::new();
 //! let (back, front) = db.init();
 //! let mut writer = back.write();
 //! let reader = front.read();
@@ -79,7 +79,8 @@ impl Side {
 struct StateInner(u8);
 
 /// We pack the state in a single byte as follows:
-/// ****SDAB (in big endian)
+/// ***ISDAB (in big endian)
+/// - I is the initialized bit
 /// - S is the swapped bit
 /// - D is the dirty bit
 /// - A and B are the active bits for the two accessors
@@ -93,6 +94,12 @@ impl StateInner {
     const DIRTY: u8 = 1 << 2;
     /// Set when the buffers are currently swapped relative to their default association.
     const SWAPPED: u8 = 1 << 3;
+    /// Set once `init` has been called.
+    const INITIALIZED: u8 = 1 << 4;
+
+    const fn is_initialized(self) -> bool {
+        self.0 & Self::INITIALIZED != 0
+    }
 
     /// Whether the accessor of the given side currently holds a guard.
     const fn is_active(self, side: Side) -> bool {
@@ -155,6 +162,12 @@ impl State {
         StateInner(self.0.load(Ordering::Relaxed))
     }
 
+    /// Atomically marks the double buffer as initialized. Returns `false` if it already was.
+    fn try_mark_initialized(&self) -> bool {
+        let prev = StateInner(self.0.fetch_or(StateInner::INITIALIZED, Ordering::AcqRel));
+        !prev.is_initialized()
+    }
+
     /// Atomically marks the given side as active (and sets the dirty flag in case of write access) and
     /// returns whether the buffers are swapped, as observed in that same transition.
     /// Returns `None` without changing anything if the side is already active.
@@ -208,12 +221,18 @@ impl State {
 /// # Examples
 /// ```
 /// # use doublebuf::*;
-/// let mut db: DoubleBuf<u8> = DoubleBuf::new();
+/// let db: DoubleBuf<u8> = DoubleBuf::new();
 /// let (back, front) = db.init();
 /// // use read() and write() as required
 /// ```
+///
+/// A common pattern in embedded programming is to put global data in a `static`. This is possible using [`from_values`](`DoubleBuf::from_values`).
+/// ```
+/// # use doublebuf::*;
+/// static DB: DoubleBuf<u8> = DoubleBuf::from_values(1, 2);
+/// let (a, b) = DB.init();
+/// ```
 pub struct DoubleBuf<T> {
-    initialized: bool,
     state: State,
     buf1: UnsafeCell<T>,
     buf2: UnsafeCell<T>,
@@ -296,7 +315,6 @@ impl<T> DoubleBuf<T> {
     #[cfg(not(loom))]
     pub const fn from_values(buf1: T, buf2: T) -> DoubleBuf<T> {
         DoubleBuf {
-            initialized: false,
             state: State::new(),
             buf1: UnsafeCell::new(buf1),
             buf2: UnsafeCell::new(buf2),
@@ -307,7 +325,6 @@ impl<T> DoubleBuf<T> {
     #[cfg(loom)]
     pub fn from_values(buf1: T, buf2: T) -> DoubleBuf<T> {
         DoubleBuf {
-            initialized: false,
             state: State::new(),
             buf1: UnsafeCell::new(buf1),
             buf2: UnsafeCell::new(buf2),
@@ -323,14 +340,15 @@ impl<T> DoubleBuf<T> {
     /// Initializes the double buffer, returning the accessors.
     /// This method must not be called more than once.
     ///
+    /// Since this takes `&self`, it can be called on a `static` double buffer.
+    ///
     /// # Panics
     ///
     /// Will panic if called more than once.
-    pub const fn init(&mut self) -> (Accessor<'_, T>, Accessor<'_, T>) {
-        if self.initialized {
+    pub fn init(&self) -> (Accessor<'_, T>, Accessor<'_, T>) {
+        if !self.state.try_mark_initialized() {
             panic!("DoubleBuf::init should be only called once");
         }
-        self.initialized = true;
         (
             Accessor {
                 side: Side::Buf1,
@@ -366,7 +384,7 @@ impl<T> fmt::Debug for DoubleBuf<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state.snapshot();
         f.debug_struct("DoubleBuf")
-            .field("initialized", &self.initialized)
+            .field("initialized", &state.is_initialized())
             .field("active_1", &state.is_active(Side::Buf1))
             .field("active_2", &state.is_active(Side::Buf2))
             .field("is_dirty", &state.is_dirty())
@@ -493,7 +511,7 @@ mod tests {
 
     #[test]
     fn test_both_write() {
-        let mut db: DoubleBuf<u8> = DoubleBuf::new();
+        let db: DoubleBuf<u8> = DoubleBuf::new();
         let (a, b) = db.init();
 
         // a writes buf1 and triggers a swap on drop; b now sees it
@@ -520,25 +538,17 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_double_init() {
-        let mut db: DoubleBuf<u8> = DoubleBuf::new();
+        let db: DoubleBuf<u8> = DoubleBuf::new();
         let _ = db.init();
         // the accessors are gone, so the borrow checker allows this; the runtime check must not
         let _ = db.init();
     }
 
     #[test]
-    fn test_const_context() {
-        // `DoubleBuf<T: Send>` is `Sync`, so it can live in a `static` ...
-        static STATIC_DB: DoubleBuf<u8> = DoubleBuf::from_values(1, 2);
-        // ... and `from_values` / `init` are usable in `const` contexts
-        const _: () = {
-            let mut db = DoubleBuf::from_values(1u8, 2u8);
-            let (_a, _b) = db.init();
-        };
-
-        let _ = &STATIC_DB;
-        let mut db = DoubleBuf::from_values(1u8, 2u8);
-        let (a, b) = db.init();
+    fn test_static() {
+        // `DoubleBuf<T: Send>` is `Sync` and `from_values` is `const`, so it can live in a `static`
+        static DB: DoubleBuf<u8> = DoubleBuf::from_values(1, 2);
+        let (a, b) = DB.init();
         // `buf1` is associated with `init().0` and `buf2` with `init().1`, as documented
         assert_eq!(*a.read(), 1);
         assert_eq!(*b.read(), 2);
@@ -546,7 +556,7 @@ mod tests {
 
     #[test]
     fn test_swap() {
-        let mut db: DoubleBuf<u8> = DoubleBuf::new();
+        let db: DoubleBuf<u8> = DoubleBuf::new();
         let (back, front) = db.init();
 
         let barrier = Barrier::new(2);
@@ -609,7 +619,7 @@ mod tests {
     // this test is mainly useful for miri to simulate different concurrency schedules
     #[test]
     fn test_swap_nosync() {
-        let mut db: DoubleBuf<u8> = DoubleBuf::new();
+        let db: DoubleBuf<u8> = DoubleBuf::new();
         let (back, front) = db.init();
 
         thread::scope(|s| {
@@ -639,7 +649,7 @@ mod tests {
 
     #[cfg(miri)]
     fn test_miri_longrun(second_should_write: bool) {
-        let mut db: DoubleBuf<u8> = DoubleBuf::new();
+        let db: DoubleBuf<u8> = DoubleBuf::new();
         let (back, front) = db.init();
         let writer = move || {
             for i in 0..64 {
@@ -681,7 +691,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_reentrant_read() {
-        let mut db: DoubleBuf<u8> = DoubleBuf::new();
+        let db: DoubleBuf<u8> = DoubleBuf::new();
         let (back, _) = db.init();
         let g1 = back.read();
         let g2 = back.read();

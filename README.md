@@ -34,7 +34,7 @@ critical-section = "1" # plus an implementation
 
 ```rust
 use doublebuf::*;
-let mut db: DoubleBuf<u8> = DoubleBuf::new();
+let db: DoubleBuf<u8> = DoubleBuf::new();
 let (back, front) = db.init();
 let mut writer = back.write();
 let reader = front.read();

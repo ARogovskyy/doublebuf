@@ -16,7 +16,7 @@ use loom::thread;
 
 type Buf = UnsafeCell<u8>;
 
-fn new_db() -> &'static mut DoubleBuf<Buf> {
+fn new_db() -> &'static DoubleBuf<Buf> {
     // Loom has no scoped threads and the accessors borrow the double buffer, so leak it.
     // This can be fixed when there is progress e.g. in https://github.com/tokio-rs/loom/pull/312
     Box::leak(Box::new(DoubleBuf::new_with(

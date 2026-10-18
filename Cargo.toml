@@ -6,7 +6,7 @@ rust-version = "1.85.1"
 description = "Concurrent auto-swapping zero-copy double buffer"
 license = "MIT"
 categories = ["embedded", "no-std", "concurrency"]
-keywords = ["double-buffer"]
+keywords = ["double-buffer", "no-std", "embedded", "spsc", "lock-free"]
 authors = ["Alexander Rogovskyy"]
 readme = "README.md"
 repository = "https://github.com/ARogovskyy/doublebuf"
@@ -14,7 +14,9 @@ repository = "https://github.com/ARogovskyy/doublebuf"
 [dependencies]
 # We need an atomic compare-and-swap. On targets without a native one, the application must configure
 # a fallback (e.g. the `critical-section` feature of `portable-atomic`); see the README.
-portable-atomic = { version = "1.3", default-features = false, features = ["require-cas"] }
+portable-atomic = { version = "1.3", default-features = false, features = [
+    "require-cas",
+] }
 
 # To use loom, compile with `RUSTFLAGS="--cfg loom"`.
 # It has to be a normal (not dev-) dependency because the library itself switches to loom's atomics.

@@ -526,6 +526,7 @@ mod tests {
 
     // `DoubleBuf` and `Accessor` are `Debug` regardless of `T` (they never print the buffers),
     // while the guards print the value and therefore need `T: Debug`.
+    #[allow(dead_code)]
     struct NoDebug;
     static_assertions::assert_impl_all!(DoubleBuf<NoDebug>: fmt::Debug);
     static_assertions::assert_impl_all!(Accessor<NoDebug>: fmt::Debug);

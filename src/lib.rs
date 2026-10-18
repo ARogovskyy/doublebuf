@@ -40,6 +40,7 @@
 //!   the buffers will never get swapped.
 
 #![no_std]
+#![cfg_attr(not(loom), deny(missing_docs))]
 
 use core::{
     cell::UnsafeCell,
@@ -251,12 +252,19 @@ pub struct Accessor<'db, T> {
     inner: &'db DoubleBuf<T>,
     side: Side,
 }
+
+/// A guard that grants write access to the buffer currently associated with the [`Accessor`].
+/// Owning it indicates that the [`Accessor`] is active and the associated buffer is dirty, i.e. due for a swap.
+/// Dropping the guard turns it inactive again and swaps the buffers if a swap is due and the other [`Accessor`] is also inactive.
 pub struct WriteGuard<'ac, 'db, T> {
     // Conceptually, this should be a &mut reference, but we want to enable this check to be done during runtime: `Accessor::try_acquire` guarantees that there is at most one guard per accessor, and therefore per buffer.
     accessor: &'ac Accessor<'db, T>,
     inner: *mut T,
 }
 
+/// A guard that grants read access to the buffer currently associated with the [`Accessor`].
+/// Owning it indicates that the [`Accessor`] is active.
+/// Dropping the guard turns it inactive again and swaps the buffers if a swap is due and the other [`Accessor`] is also inactive.
 pub struct ReadGuard<'ac, 'db, T> {
     // Conceptually, this should be a &mut reference, but we want to enable this check to be done during runtime: `Accessor::try_acquire` guarantees that there is at most one guard per accessor, and therefore per buffer.
     accessor: &'ac Accessor<'db, T>,

@@ -1,7 +1,5 @@
 # Concurrent auto-swapping zero-copy double buffer
 
-> Warning: Until this crate reaches version `1.0` it should be considered WIP-grade.
-
 This crate provides a double buffer. Differences to existing implementations:
 
 - Unlike channels, the access is by-reference and not by-value
@@ -17,7 +15,7 @@ See the [documentation](https://docs.rs/doublebuf) for the exact swap semantics 
 ## Usage
 
 ```toml
-doublebuf = "0.1"
+doublebuf = "0.2"
 ```
 
 The atomics are provided by [`portable-atomic`](https://docs.rs/portable-atomic). On targets with a native atomic
